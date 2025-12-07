@@ -1,0 +1,24 @@
+# Credentials
+.env
+
+# Python
+__pycache__/
+*.pyc
+birds/
+
+# Models
+models/
+*.pt
+*.onnx
+
+# Output
+detections/
+crops/
+
+# Data (too large for repo)
+hand_sorted/
+
+# Misc
+*.jpg
+*.png
+
