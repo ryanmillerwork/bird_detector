@@ -2,6 +2,13 @@
 """
 Train ConvNeXt-Small classifier for bird species identification.
 Stage 2 of the detection pipeline.
+
+Environment variables:
+    DATA_DIR: Path to hand_sorted images (default: ./hand_sorted)
+    OUTPUT_DIR: Where to save models (default: ./models)  
+    BATCH_SIZE: Training batch size (default: 16)
+    NUM_WORKERS: Data loader workers (default: 4)
+    TMPDIR: Temp directory for PyTorch (set if /tmp has issues)
 """
 
 import sys
@@ -14,6 +21,15 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+# Set temp directory before importing torch (fixes temp dir errors)
+if "TMPDIR" not in os.environ:
+    # Try to use a temp dir in the current directory if system tmp has issues
+    local_tmp = Path("./tmp")
+    local_tmp.mkdir(exist_ok=True)
+    os.environ["TMPDIR"] = str(local_tmp.absolute())
+    os.environ["TEMP"] = str(local_tmp.absolute())
+    os.environ["TMP"] = str(local_tmp.absolute())
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,13 +38,13 @@ from torchvision import transforms
 from PIL import Image
 import timm
 
-# Configuration
-DATA_DIR = Path("hand_sorted")
-OUTPUT_DIR = Path("models")
+# Configuration (override with environment variables)
+DATA_DIR = Path(os.environ.get("DATA_DIR", "hand_sorted"))
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "models"))
 MIN_SAMPLES = 5  # Ignore classes with fewer samples
 INPUT_SIZE = 320
-BATCH_SIZE = 4  # Reduced for Pi 5 RAM
-NUM_WORKERS = 0  # Reduced to save memory
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 16))  # 16 for 16GB RAM, reduce if OOM
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 4))  # 4 for multi-core
 EPOCHS = 30
 LEARNING_RATE = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
