@@ -192,7 +192,7 @@ def export_to_onnx(model, num_classes, input_size, output_path):
         dummy_input,
         output_path,
         export_params=True,
-        opset_version=14,
+        opset_version=18,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["output"],
@@ -292,9 +292,12 @@ def main():
         start_epoch = checkpoint.get("epoch", 0) + 1
         best_val_acc = checkpoint.get("val_acc", 0.0)
         
-        # Advance scheduler to correct position
-        for _ in range(start_epoch):
-            scheduler.step()
+        # Advance scheduler to correct position (suppress harmless warning)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for _ in range(start_epoch):
+                scheduler.step()
         
         print(f"  Resumed from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
     

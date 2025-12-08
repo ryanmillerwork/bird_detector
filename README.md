@@ -10,7 +10,7 @@ uv venv birds
 source birds/bin/activate
 
 # Install dependencies
-uv pip install opencv-python ultralytics timm
+uv pip install opencv-python ultralytics timm onnxscript
 ```
 
 ### Camera Credentials
