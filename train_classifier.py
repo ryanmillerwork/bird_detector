@@ -3,12 +3,11 @@
 Train ConvNeXt-Small classifier for bird species identification.
 Stage 2 of the detection pipeline.
 
-Environment variables:
+Configuration via .env file:
     DATA_DIR: Path to hand_sorted images (default: ./hand_sorted)
     OUTPUT_DIR: Where to save models (default: ./models)  
     BATCH_SIZE: Training batch size (default: 16)
     NUM_WORKERS: Data loader workers (default: 4)
-    TMPDIR: Temp directory for PyTorch (set if /tmp has issues)
 """
 
 import sys
@@ -21,14 +20,27 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+
+def load_env():
+    """Load config from .env file."""
+    env = {}
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().strip().split("\n"):
+            if "=" in line and not line.startswith("#"):
+                key, val = line.split("=", 1)
+                env[key.strip()] = val.strip()
+    return env
+
+
+_env = load_env()
+
 # Set temp directory before importing torch (fixes temp dir errors)
-if "TMPDIR" not in os.environ:
-    # Try to use a temp dir in the current directory if system tmp has issues
-    local_tmp = Path("./tmp")
-    local_tmp.mkdir(exist_ok=True)
-    os.environ["TMPDIR"] = str(local_tmp.absolute())
-    os.environ["TEMP"] = str(local_tmp.absolute())
-    os.environ["TMP"] = str(local_tmp.absolute())
+local_tmp = Path("./tmp")
+local_tmp.mkdir(exist_ok=True)
+os.environ["TMPDIR"] = str(local_tmp.absolute())
+os.environ["TEMP"] = str(local_tmp.absolute())
+os.environ["TMP"] = str(local_tmp.absolute())
 
 import torch
 import torch.nn as nn
@@ -38,13 +50,13 @@ from torchvision import transforms
 from PIL import Image
 import timm
 
-# Configuration (override with environment variables)
-DATA_DIR = Path(os.environ.get("DATA_DIR", "hand_sorted"))
-OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "models"))
+# Configuration (from .env file)
+DATA_DIR = Path(_env.get("DATA_DIR", "hand_sorted"))
+OUTPUT_DIR = Path(_env.get("OUTPUT_DIR", "models"))
 MIN_SAMPLES = 5  # Ignore classes with fewer samples
 INPUT_SIZE = 320
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 16))  # 16 for 16GB RAM, reduce if OOM
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", 4))  # 4 for multi-core
+BATCH_SIZE = int(_env.get("BATCH_SIZE", "16"))
+NUM_WORKERS = int(_env.get("NUM_WORKERS", "4"))
 EPOCHS = 30
 LEARNING_RATE = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -266,11 +278,30 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
     
-    # Training loop
+    # Resume from checkpoint if exists
+    start_epoch = 0
     best_val_acc = 0.0
+    checkpoint_path = OUTPUT_DIR / "best_model.pt"
+    
+    if checkpoint_path.exists():
+        print(f"\nFound existing checkpoint, resuming training...")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint.get("epoch", 0) + 1
+        best_val_acc = checkpoint.get("val_acc", 0.0)
+        
+        # Advance scheduler to correct position
+        for _ in range(start_epoch):
+            scheduler.step()
+        
+        print(f"  Resumed from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
+    
+    # Training loop
     print("\nStarting training...\n")
     
-    for epoch in range(EPOCHS):
+    for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
         
         print(f"Epoch {epoch + 1}/{EPOCHS}")
@@ -298,6 +329,11 @@ def main():
                 "input_size": INPUT_SIZE,
             }, checkpoint_path)
             print(f"  Saved best model (val_acc: {val_acc:.2f}%)")
+            
+            # Also export ONNX so we have it even if training is interrupted
+            onnx_path = OUTPUT_DIR / "bird_classifier.onnx"
+            export_to_onnx(model, num_classes, INPUT_SIZE, str(onnx_path))
+            model = model.to(DEVICE)  # Move back to device after export
         
         print()
     

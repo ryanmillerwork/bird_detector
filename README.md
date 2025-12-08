@@ -24,10 +24,17 @@ cp .env.example .env
 
 `.env` format:
 ```
+# Camera credentials
 CAMERA_USER=admin
 CAMERA_PASS=your_password
 CAMERA_IP=192.168.0.100
 CAMERA_PORT=554
+
+# Training config (optional)
+DATA_DIR=hand_sorted
+OUTPUT_DIR=models
+BATCH_SIZE=16
+NUM_WORKERS=4
 ```
 
 This file is git-ignored to keep credentials out of the repo.
@@ -82,7 +89,7 @@ Classes with fewer than 5 images are automatically excluded.
 ```bash
 cd ~/bird_detector
 source birds/bin/activate
-taskset -c 1-3 python train_classifier.py
+python train_classifier.py
 ```
 
 > **Note:** `taskset -c 1-3` pins training to cores 1-3, leaving core 0 free for system tasks and SSH.
@@ -90,16 +97,33 @@ taskset -c 1-3 python train_classifier.py
 **Output** (saved to `models/`):
 - `best_model.pt` — Best validation accuracy checkpoint
 - `final_model.pt` — Final epoch checkpoint  
-- `bird_classifier.onnx` — Optimized for inference
+- `bird_classifier.onnx` — Optimized for inference (updated on each best model)
 - `class_mapping.json` — Class name ↔ index mapping
 
-**Configuration** (edit at top of file):
+**Resume training:** If `best_model.pt` exists, training automatically resumes from that checkpoint.
+
+**Configuration** (in `.env` file):
 - `INPUT_SIZE` — Image size (default 320)
-- `BATCH_SIZE` — Reduce if running out of RAM (default 8)
 - `EPOCHS` — Training epochs (default 30)
 - `MIN_SAMPLES` — Minimum images per class (default 5)
 
-Training on Pi 5 CPU takes ~5-10 minutes per epoch.
+## Deployment to Pi 5
+
+After training, copy these files from the training machine to the Pi:
+
+```bash
+# From training machine
+scp models/bird_classifier.onnx pi@datalogger.local:~/bird_detector/models/
+scp models/class_mapping.json pi@datalogger.local:~/bird_detector/models/
+```
+
+**Required files on Pi:**
+| File | Location | Purpose |
+|------|----------|---------|
+| `bird_classifier.onnx` | `models/` | Trained classifier (ONNX for fast inference) |
+| `class_mapping.json` | `models/` | Maps model output indices to bird names |
+
+The ONNX file is exported automatically whenever a new best model is saved during training, so you'll always have a usable model even if training is interrupted.
 
 ## Pipeline Overview
 
