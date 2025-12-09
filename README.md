@@ -7,10 +7,8 @@ Two-stage bird detection and classification system for Raspberry Pi 5. Captures 
 ```bash
 # Create and activate environment
 uv venv birds
-source birds/bin/activate
-
 # Install dependencies
-uv pip install opencv-python ultralytics timm onnxscript
+uv pip install opencv-python ultralytics timm onnxscript onnxruntime
 ```
 
 ### Camera Credentials
@@ -114,6 +112,7 @@ After training, copy these files from the training machine to the Pi:
 ```bash
 # From training machine
 scp models/bird_classifier.onnx pi@datalogger.local:~/bird_detector/models/
+scp models/bird_classifier.onnx.data pi@datalogger.local:~/bird_detector/models/
 scp models/class_mapping.json pi@datalogger.local:~/bird_detector/models/
 ```
 
@@ -121,9 +120,10 @@ scp models/class_mapping.json pi@datalogger.local:~/bird_detector/models/
 | File | Location | Purpose |
 |------|----------|---------|
 | `bird_classifier.onnx` | `models/` | Trained classifier (ONNX for fast inference) |
+| `bird_classifier.onnx.data` (if present) | `models/` | External weight shards when ONNX export uses external data |
 | `class_mapping.json` | `models/` | Maps model output indices to bird names |
 
-The ONNX file is exported automatically whenever a new best model is saved during training, so you'll always have a usable model even if training is interrupted.
+The ONNX file is exported automatically whenever a new best model is saved during training, so you'll always have a usable model even if training is interrupted. If your export produced a `bird_classifier.onnx.data` file, copy it alongside `bird_classifier.onnx` or re-export with embedded weights to avoid the extra file.
 
 ## Pipeline Overview
 
