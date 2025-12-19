@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture a single frame from Reolink camera."""
+"""Capture a single frame from an RTSP stream (go2rtc or direct camera)."""
 
 import cv2
 import sys
@@ -20,13 +20,37 @@ def load_env():
 
 
 _env = load_env()
-RTSP_URL = f"rtsp://{_env['CAMERA_USER']}:{_env['CAMERA_PASS']}@{_env['CAMERA_IP']}:{_env['CAMERA_PORT']}/h264Preview_01_main"
+
+RTSP_URL_OVERRIDE = _env.get("RTSP_URL") or None
+RTSP_PATH = _env.get("RTSP_PATH", "rtsp://192.168.0.50:8554/bird_cam")
+
+
+def build_rtsp_url():
+    if RTSP_URL_OVERRIDE:
+        return RTSP_URL_OVERRIDE
+    if RTSP_PATH.startswith("rtsp://"):
+        return RTSP_PATH
+    required = ("CAMERA_USER", "CAMERA_PASS", "CAMERA_IP", "CAMERA_PORT")
+    missing = [k for k in required if not _env.get(k)]
+    if missing:
+        raise ValueError(
+            "RTSP_PATH is not a full rtsp:// URL, but camera credentials are missing.\n"
+            f"Missing: {', '.join(missing)}\n"
+            "Fix: set RTSP_URL to a full URL (recommended with go2rtc) or set CAMERA_USER/CAMERA_PASS/CAMERA_IP/CAMERA_PORT."
+        )
+    return f"rtsp://{_env['CAMERA_USER']}:{_env['CAMERA_PASS']}@{_env['CAMERA_IP']}:{_env['CAMERA_PORT']}/{RTSP_PATH}"
 
 def capture_frame(output_path=None):
     """Grab a single frame from the RTSP stream."""
     
     # Open the stream
-    cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+    try:
+        rtsp_url = build_rtsp_url()
+    except ValueError as e:
+        print(str(e))
+        return None
+
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     
     if not cap.isOpened():
         print("Error: Could not open RTSP stream")

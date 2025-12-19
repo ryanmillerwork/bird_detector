@@ -35,7 +35,8 @@ def load_env():
 
 _env = load_env()
 RTSP_URL_OVERRIDE = _env.get("RTSP_URL") or None
-RTSP_PATH = _env.get("RTSP_PATH", "h264Preview_01_main")
+# Default to go2rtc stream (user can override via .env)
+RTSP_PATH = _env.get("RTSP_PATH", "rtsp://192.168.0.50:8554/bird_cam")
 RTSP_TRANSPORT = _env.get("RTSP_TRANSPORT", "tcp")  # passed as FFmpeg option, not query param
 RTSP_TIMEOUT_US = _env.get("RTSP_TIMEOUT_US", "5000000")  # FFmpeg stimeout in microseconds
 RTSP_MAX_DELAY_US = _env.get("RTSP_MAX_DELAY_US", "0")   # FFmpeg max_delay (0 = disable buffering)
@@ -61,6 +62,14 @@ def build_rtsp_url():
     # Allow RTSP_PATH to be a full URL; if so, use it verbatim
     if RTSP_PATH.startswith("rtsp://"):
         return RTSP_PATH
+    required = ("CAMERA_USER", "CAMERA_PASS", "CAMERA_IP", "CAMERA_PORT")
+    missing = [k for k in required if not _env.get(k)]
+    if missing:
+        raise ValueError(
+            "RTSP_PATH is not a full rtsp:// URL, but camera credentials are missing.\n"
+            f"Missing: {', '.join(missing)}\n"
+            "Fix: set RTSP_URL to a full URL (recommended with go2rtc) or set CAMERA_USER/CAMERA_PASS/CAMERA_IP/CAMERA_PORT."
+        )
     return f"rtsp://{_env['CAMERA_USER']}:{_env['CAMERA_PASS']}@{_env['CAMERA_IP']}:{_env['CAMERA_PORT']}/{RTSP_PATH}"
 
 
@@ -296,17 +305,24 @@ def main():
     model = YOLO("yolov8s.pt")
     print("Model loaded.")
     
-    connect_url = build_rtsp_url()
+    try:
+        connect_url = build_rtsp_url()
+    except ValueError as e:
+        print(str(e))
+        return
     if RTSP_URL_OVERRIDE or RTSP_PATH.startswith("rtsp://"):
-        print("Connecting to camera... (explicit URL)")
+        print("Connecting to RTSP stream... (explicit URL)")
     else:
-        print(f"Connecting to camera... (transport={RTSP_TRANSPORT or 'default'}, path={RTSP_PATH})")
+        print(f"Connecting to RTSP stream... (transport={RTSP_TRANSPORT or 'default'}, path={RTSP_PATH})")
     
     frame_queue: queue.Queue = queue.Queue(maxsize=1)  # holds (frame, grab_ms)
     stop_event = threading.Event()
     cap_ref = {"cap": None}  # to allow cleanup in producer
+    consecutive_snap_failures = 0
+    last_snap_error_log = 0.0
 
     def producer():
+        nonlocal consecutive_snap_failures, last_snap_error_log, connect_url
         if SNAPSHOT_MODE:
             print("Snapshot mode enabled: producer grabbing frames via ffmpeg as fast as possible.")
         else:
@@ -336,14 +352,39 @@ def main():
                 snap_start = time.time()
                 frame, snap_err = grab_frame_snapshot(connect_url, RTSP_TRANSPORT or "tcp", None)
                 if frame is None:
-                    if snap_err:
-                        print(f"[producer] Snapshot grab failed: {snap_err.strip()}")
+                    # Keep the latest non-empty error string for logging
+                    last_err = snap_err or ""
                     # Fallback without transport hints
                     frame, snap_err = grab_frame_snapshot(connect_url, None, None)
+                    if frame is None and snap_err:
+                        last_err = snap_err
                     if frame is None:
-                        if snap_err:
-                            print(f"[producer] Snapshot fallback failed: {snap_err.strip()}")
+                        consecutive_snap_failures += 1
+                        now = time.time()
+                        # Rate-limit logs but surface first failure and periodic updates
+                        if consecutive_snap_failures == 1 or now - last_snap_error_log > 5:
+                            prefix = f"[producer] Snapshot failed {consecutive_snap_failures}x in a row"
+                            if last_err:
+                                first_line = last_err.strip().splitlines()[0]
+                                print(f"{prefix}: {first_line}")
+                            else:
+                                print(prefix)
+                            last_snap_error_log = now
+                        # Back off to avoid hammering the camera/log spam
+                        backoff = min(0.2 * consecutive_snap_failures, 5.0)
+                        if backoff > 0:
+                            time.sleep(backoff)
+                        # Reset connection after repeated failures
+                        if consecutive_snap_failures >= 10 and consecutive_snap_failures % 10 == 0:
+                            reset_delay = min(2.0 + 0.1 * consecutive_snap_failures, 5.0)
+                            print(f"[producer] Resetting after {consecutive_snap_failures} snapshot failures (sleep {reset_delay:.1f}s)...")
+                            connect_url = build_rtsp_url()  # reload in case env changed
+                            time.sleep(reset_delay)
+                            last_snap_error_log = time.time()
+                            # keep counting to know streak length
                         continue
+                # Success path resets failure counter
+                consecutive_snap_failures = 0
                 grab_ms = (time.time() - snap_start) * 1000.0
             else:
                 cap = cap_ref["cap"]

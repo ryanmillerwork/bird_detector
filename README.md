@@ -16,17 +16,28 @@ uv pip install opencv-python ultralytics timm onnxscript onnxruntime
 Copy the example config and add your camera credentials:
 
 ```bash
-cp .env.example .env
+cp env.example .env
 # Edit .env with your camera details
 ```
 
 `.env` format:
 ```
-# Camera credentials
-CAMERA_USER=admin
-CAMERA_PASS=your_password
-CAMERA_IP=192.168.0.100
-CAMERA_PORT=554
+# RTSP (recommended: go2rtc)
+RTSP_URL=rtsp://192.168.0.50:8554/bird_cam
+
+# Alternative: direct camera RTSP path + credentials
+# CAMERA_USER=admin
+# CAMERA_PASS=your_password
+# CAMERA_IP=192.168.0.100
+# CAMERA_PORT=554
+# RTSP_PATH=h264Preview_01_main
+
+# RTSP / capture tuning
+RTSP_TRANSPORT=tcp                # passed to ffmpeg/opencv; tcp recommended
+RTSP_TIMEOUT_US=5000000           # optional; ffmpeg stimeout
+RTSP_MAX_DELAY_US=0               # optional; ffmpeg max_delay (0 disables buffering)
+RTSP_BUFFER_SIZE=0                # optional; ffmpeg buffer_size
+SNAPSHOT_MODE=true                # true uses ffmpeg per-frame capture; false uses persistent OpenCV RTSP
 
 # Training config (optional)
 DATA_DIR=hand_sorted
@@ -53,15 +64,17 @@ python capture_frame.py my_photo.jpg
 
 ### `detector.py`
 
-Main detection pipeline. Connects to the RTSP stream, runs YOLOv8s every 2 seconds to detect animals (birds, cats, dogs, etc.), and saves:
-- Annotated frames with bounding boxes → `detections/`
-- Cropped animals (with 100px padding) → `crops/`
+Main detection pipeline. Default mode (snapshot + producer/consumer threading):
+- Producer grabs frames via ffmpeg/RTSP (TCP by default), as fast as possible, dropping old frames to keep only the freshest.
+- Consumer runs YOLOv8s on the latest frame, classifies crops with the ONNX classifier, and saves:
+  - Annotated frames with bounding boxes → `detections/` (keeps last 10)
+  - Cropped animals (with 100px padding) → `crops/<classification>/`
 
 ```bash
 python detector.py
 ```
 
-Press `Ctrl+C` to stop. Timing breakdown is printed for each frame showing grab time and detection time.
+Press `Ctrl+C` to stop. Timing breakdown is printed for each frame showing grab, detection, and classification times.
 
 **Configuration** (edit at top of file):
 - `ANIMAL_CLASSES` — Which COCO classes to detect
