@@ -17,6 +17,7 @@ import os
 import json
 import random
 import time
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -132,6 +133,100 @@ def create_model(num_classes):
         num_classes=num_classes,
     )
     return model
+
+
+def class_mapping_fingerprint(class_to_idx: dict) -> str:
+    """Stable fingerprint for a class mapping (order-independent)."""
+    payload = json.dumps(class_to_idx, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # Short fingerprint is enough to detect mismatches without being noisy.
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def load_checkpoint_safely(
+    checkpoint_path: Path,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler,
+    *,
+    num_classes: int,
+    class_to_idx: dict,
+):
+    """
+    Load a training checkpoint.
+
+    If the checkpoint was trained with a different class mapping (count or mapping),
+    we "warm start" by only loading tensors that match by name *and* shape, and we
+    reset optimizer/scheduler/epoch tracking. This avoids head size mismatches.
+    """
+    checkpoint = torch.load(checkpoint_path, weights_only=False)
+
+    ckpt_num_classes = checkpoint.get("num_classes")
+    if ckpt_num_classes is None and isinstance(checkpoint.get("class_to_idx"), dict):
+        ckpt_num_classes = len(checkpoint["class_to_idx"])
+
+    current_fp = class_mapping_fingerprint(class_to_idx)
+    ckpt_fp = checkpoint.get("class_mapping_fingerprint")
+    if ckpt_fp is None and isinstance(checkpoint.get("class_to_idx"), dict):
+        ckpt_fp = class_mapping_fingerprint(checkpoint["class_to_idx"])
+
+    mapping_mismatch = (ckpt_num_classes is not None and ckpt_num_classes != num_classes) or (
+        ckpt_fp is not None and ckpt_fp != current_fp
+    )
+
+    if mapping_mismatch:
+        print(
+            "\nCheckpoint class mapping differs from current training run; "
+            "loading matching weights only and restarting optimizer/scheduler."
+        )
+        if ckpt_num_classes is not None:
+            print(f"  Checkpoint num_classes: {ckpt_num_classes}, current: {num_classes}")
+        if ckpt_fp is not None:
+            print(f"  Checkpoint mapping fp: {ckpt_fp}, current: {current_fp}")
+
+        ckpt_state = checkpoint.get("model_state_dict", checkpoint)
+        model_state = model.state_dict()
+        filtered_state = {}
+        skipped = 0
+        for k, v in ckpt_state.items():
+            if k in model_state and hasattr(v, "shape") and model_state[k].shape == v.shape:
+                filtered_state[k] = v
+            else:
+                skipped += 1
+
+        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+        if skipped:
+            print(f"  Skipped {skipped} tensor(s) due to shape/name mismatch (e.g., classifier head).")
+        if missing:
+            print(f"  Missing keys (expected with new head): {len(missing)}")
+        if unexpected:
+            print(f"  Unexpected keys: {len(unexpected)}")
+
+        return {
+            "start_epoch": 0,
+            "best_val_acc": 0.0,
+            "resumed": False,
+        }
+
+    # Exact match: full resume
+    model.load_state_dict(checkpoint["model_state_dict"])
+    if "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_epoch = checkpoint.get("epoch", 0) + 1
+    best_val_acc = checkpoint.get("val_acc", 0.0)
+
+    # Advance scheduler to correct position (suppress harmless warning)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(start_epoch):
+            scheduler.step()
+
+    return {
+        "start_epoch": start_epoch,
+        "best_val_acc": best_val_acc,
+        "resumed": True,
+    }
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
@@ -281,21 +376,20 @@ def main():
     
     if checkpoint_path.exists():
         print(f"\nFound existing checkpoint, resuming training...")
-        checkpoint = torch.load(checkpoint_path, weights_only=False)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if "optimizer_state_dict" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        best_val_acc = checkpoint.get("val_acc", 0.0)
-        
-        # Advance scheduler to correct position (suppress harmless warning)
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for _ in range(start_epoch):
-                scheduler.step()
-        
-        print(f"  Resumed from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
+        resume = load_checkpoint_safely(
+            checkpoint_path,
+            model,
+            optimizer,
+            scheduler,
+            num_classes=num_classes,
+            class_to_idx=class_to_idx,
+        )
+        start_epoch = resume["start_epoch"]
+        best_val_acc = resume["best_val_acc"]
+        if resume["resumed"]:
+            print(f"  Resumed from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
+        else:
+            print("  Warm-started from checkpoint weights (new classifier head).")
     
     # Training loop
     print("\nStarting training...\n")
@@ -325,6 +419,8 @@ def main():
                 "val_acc": val_acc,
                 "class_to_idx": class_to_idx,
                 "idx_to_class": idx_to_class,
+                "num_classes": num_classes,
+                "class_mapping_fingerprint": class_mapping_fingerprint(class_to_idx),
                 "input_size": INPUT_SIZE,
             }, checkpoint_path)
             print(f"  Saved best model (val_acc: {val_acc:.2f}%)")
@@ -344,6 +440,8 @@ def main():
         "val_acc": val_acc,
         "class_to_idx": class_to_idx,
         "idx_to_class": idx_to_class,
+        "num_classes": num_classes,
+        "class_mapping_fingerprint": class_mapping_fingerprint(class_to_idx),
         "input_size": INPUT_SIZE,
     }, final_path)
     print(f"Saved final model to {final_path}")
