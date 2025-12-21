@@ -134,6 +134,12 @@ source birds/bin/activate
 python train_classifier.py
 ```
 
+> **Home-directory one-liner (no activate):** If you keep the repo in `~/bird_detector` and the venv under `~/pyenvs/bird_detector/`, you can run training without activating the venv, but **this command must be run from your HOME directory** so the `./pyenvs/...` relative path resolves:
+>
+> ```bash
+> /pyenvs/bird_detector/birds/bin/python3 ./pyenvs/bird_detector/train_classifier.py
+> ```
+
 > **Note:** `taskset -c 1-3` pins training to cores 1-3, leaving core 0 free for system tasks and SSH.
 
 **Output** (saved to `models/`):
