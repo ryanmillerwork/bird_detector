@@ -1,6 +1,11 @@
 # Bird Detector
 
-Two-stage bird detection and classification system for Raspberry Pi 5. Captures frames from a Reolink camera via RTSP, detects animals using YOLOv8s, then classifies bird species using a fine-tuned ConvNeXt-Small model.
+Two-stage bird detection and classification system for Raspberry Pi 5. Captures frames via **Frigate JPEG snapshots**, detects animals using YOLOv8s, then classifies bird species using a fine-tuned ConvNeXt-Small model.
+
+At runtime, `birdwatch.py`:
+- Saves **annotated full frames** (YOLO boxes) to `detections/`
+- Saves **cropped detections** to `crops/<label>/`
+- Optionally **speaks the detected species name** (Piper) and can **play a matching bird song** from `bird_songs/`
 
 ## Setup
 
@@ -20,32 +25,22 @@ cp env.example .env
 # Edit .env with your camera details
 ```
 
-`.env` format:
+`.env` format (used by **both** `birdwatch.py` and `train_classifier.py`):
 ```
-# RTSP (recommended: go2rtc)
-RTSP_URL=rtsp://192.168.0.50:8554/bird_cam
+# Runtime (birdwatch.py)
+FRIGATE_HOST=192.168.0.50:5000
+FRIGATE_CAMERA=bird
+# JPEG_URL=http://192.168.0.50:5000/api/bird/latest.jpg   # optional override
+CAPTURE_INTERVAL_S=2.0
 
-# Alternative: direct camera RTSP path + credentials
-# CAMERA_USER=admin
-# CAMERA_PASS=your_password
-# CAMERA_IP=192.168.0.100
-# CAMERA_PORT=554
-# RTSP_PATH=h264Preview_01_main
-
-# RTSP / capture tuning
-RTSP_TRANSPORT=tcp                # passed to ffmpeg/opencv; tcp recommended
-RTSP_TIMEOUT_US=5000000           # optional; ffmpeg stimeout
-RTSP_MAX_DELAY_US=0               # optional; ffmpeg max_delay (0 disables buffering)
-RTSP_BUFFER_SIZE=0                # optional; ffmpeg buffer_size
-SNAPSHOT_MODE=true                # true uses ffmpeg per-frame capture; false uses persistent OpenCV RTSP
-
-# Training config (optional)
+# Training (train_classifier.py)
 DATA_DIR=hand_sorted
 OUTPUT_DIR=models
 BATCH_SIZE=16
 NUM_WORKERS=4
 ```
 
+`birdwatch.py` loads `.env` at startup. **Real environment variables take precedence** over `.env` values.
 This file is git-ignored to keep credentials out of the repo.
 
 ## Files
@@ -62,24 +57,60 @@ python capture_frame.py
 python capture_frame.py my_photo.jpg
 ```
 
-### `detector.py`
+### `birdwatch.py`
 
-Main detection pipeline. Default mode (snapshot + producer/consumer threading):
-- Producer grabs frames via ffmpeg/RTSP (TCP by default), as fast as possible, dropping old frames to keep only the freshest.
-- Consumer runs YOLOv8s on the latest frame, classifies crops with the ONNX classifier, and saves:
+Main detection pipeline (producer/consumer threading):
+- Producer grabs frames from **Frigate JPEG snapshots** (avoids many RTSP/H264 corruption issues).
+- Capture is **wall-clock aligned** to a fixed cadence (default `CAPTURE_INTERVAL_S=2.0`).
+- Consumer runs YOLOv8s on the latest frame, classifies crops with the ONNX classifier (if present), and saves:
   - Annotated frames with bounding boxes → `detections/` (keeps last 10)
   - Cropped animals (with 100px padding) → `crops/<classification>/`
 
 ```bash
-python detector.py
+python birdwatch.py
 ```
 
 Press `Ctrl+C` to stop. Timing breakdown is printed for each frame showing grab, detection, and classification times.
 
-**Configuration** (edit at top of file):
-- `ANIMAL_CLASSES` — Which COCO classes to detect
-- `confidence` — Detection threshold (default 0.4)
-- `padding` — Pixels to add around crops (default 100)
+**Runtime configuration** (environment variables)
+
+- **Capture source**
+  - **`FRIGATE_HOST`**: Frigate host:port (default: `192.168.0.50:5000`)
+  - **`FRIGATE_CAMERA`**: Frigate camera name (default: `bird`)
+  - **`JPEG_URL`**: override full URL for latest JPEG (default: `http://$FRIGATE_HOST/api/$FRIGATE_CAMERA/latest.jpg`)
+  - **`JPEG_TIMEOUT_S`**: HTTP timeout for JPEG fetches (default: `3.0`)
+  - **`CAPTURE_INTERVAL_S`**: seconds between grabs (default: `2.0`)
+
+- **Detection**
+  - **`DETECT_CONF`**: YOLO confidence threshold (default: `0.25`)
+  - **`DETECT_PADDING`**: pixels of padding around crops (default: `100`)
+
+- **Text-to-speech + bird songs (optional)**
+  - **`TTS_ENABLED`**: `0/1` (default: `1`)
+  - **`TTS_PIPER_MODEL`**: path to Piper `.onnx` model (expects a matching `.onnx.json` beside it)
+  - **`TTS_MIN_CONF`**: minimum species confidence to speak/play song (default: `0.0`)
+  - **`TTS_COOLDOWN_S`**: minimum seconds between repeating the same phrase (default: `15`)
+  - **`TTS_PREROLL_MS`**: leading silence before speech (default: `650`)
+  - **`BIRD_SONGS_ENABLED`**: `0/1` (default: `1` when TTS is enabled)
+  - **`BIRD_SONGS_DIR`**: directory of audio files named like `<class>.(mp3|wav)` (default: `./bird_songs`)
+  - **`BIRD_SONGS_MAX_S`**: max seconds of bird song to play (default: `10`)
+
+Example:
+
+```bash
+# Frigate JPEG (default):
+export FRIGATE_HOST="192.168.0.50:5000"
+export FRIGATE_CAMERA="bird"
+export CAPTURE_INTERVAL_S="2.0"
+
+# Optional tuning
+export DETECT_CONF="0.25"
+export DETECT_PADDING="100"
+
+# Optional audio
+export TTS_ENABLED="1"  # set to 0 to disable
+python birdwatch.py
+```
 
 ### `train_classifier.py`
 
@@ -170,8 +201,5 @@ Camera (RTSP)
 |-------|-------|------|
 | Frame grab | — | ~50ms |
 | Detection | YOLOv8s | ~900ms |
-| Classification | ConvNeXt-Small | ~500ms (estimated) |
-| **Total** | | **~1.5s** |
-
-Comfortably fits in a 2-second capture interval.
-
+| Classification | ConvNeXt-Small | ~1000ms (estimated) |
+| **Total** | | **~1.9s** |
