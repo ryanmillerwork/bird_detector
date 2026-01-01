@@ -134,10 +134,20 @@ source birds/bin/activate
 python train_classifier.py
 ```
 
-> **Home-directory one-liner (no activate):** If you keep the repo in `~/bird_detector` and the venv under `~/pyenvs/bird_detector/`, you can run training without activating the venv, but **this command must be run from your HOME directory** so the `./pyenvs/...` relative path resolves:
+> **Tip (recommended over SSH):** Run training inside `tmux` so it keeps running if your SSH session drops.
 >
 > ```bash
-> /pyenvs/bird_detector/birds/bin/python3 ./pyenvs/bird_detector/train_classifier.py
+> tmux new -s train
+> # run your training command...
+> # Detach: Ctrl-b then d
+> # Re-attach later: tmux attach -t train
+> ```
+
+> **No-activate option (recommended):** If you keep a training venv+script under `~/pyenvs/bird_detector/`, you can run training without activating anything:
+>
+> ```bash
+> cd ~/pyenvs/bird_detector
+> ./birds/bin/python3 train_classifier.py
 > ```
 
 > **Note:** `taskset -c 1-3` pins training to cores 1-3, leaving core 0 free for system tasks and SSH.

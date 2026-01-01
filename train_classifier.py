@@ -18,6 +18,7 @@ import json
 import random
 import time
 import hashlib
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -36,12 +37,16 @@ def load_env():
 
 _env = load_env()
 
-# Set temp directory before importing torch (fixes temp dir errors)
-local_tmp = Path("./tmp")
-local_tmp.mkdir(exist_ok=True)
-os.environ["TMPDIR"] = str(local_tmp.absolute())
-os.environ["TEMP"] = str(local_tmp.absolute())
-os.environ["TMP"] = str(local_tmp.absolute())
+# Set temp directory before importing torch.
+# IMPORTANT: default to a *local* filesystem (e.g. /tmp). On many clusters, the repo
+# lives on NFS; using ./tmp can create noisy `.nfs*` cleanup errors with multiprocessing.
+_tmp_root = Path(os.environ.get("BIRD_DETECTOR_TMPDIR", "/tmp/bird_detector_tmp"))
+_tmp_root.mkdir(parents=True, exist_ok=True)
+os.environ["TMPDIR"] = str(_tmp_root)
+os.environ["TEMP"] = str(_tmp_root)
+os.environ["TMP"] = str(_tmp_root)
+# Ensure Python's tempfile module uses the same location.
+tempfile.tempdir = str(_tmp_root)
 
 import torch
 import torch.nn as nn
@@ -57,7 +62,17 @@ OUTPUT_DIR = Path(_env.get("OUTPUT_DIR", "models"))
 MIN_SAMPLES = 5  # Ignore classes with fewer samples
 INPUT_SIZE = 320
 BATCH_SIZE = int(_env.get("BATCH_SIZE", "16"))
-NUM_WORKERS = int(_env.get("NUM_WORKERS", "4"))
+_requested_workers = int(_env.get("NUM_WORKERS", "4"))
+try:
+    _suggested_max_workers = len(os.sched_getaffinity(0))
+except Exception:
+    _suggested_max_workers = os.cpu_count() or 4
+
+# PyTorch warns based on total workers across all DataLoaders (train + val).
+# Keep the total <= suggested max to avoid oversubscription in cgroups/SLURM allocations.
+TRAIN_NUM_WORKERS = min(_requested_workers, _suggested_max_workers)
+VAL_NUM_WORKERS = min(_requested_workers, max(0, _suggested_max_workers - TRAIN_NUM_WORKERS))
+NUM_WORKERS = TRAIN_NUM_WORKERS  # Back-compat: used for printing only
 EPOCHS = 30
 LEARNING_RATE = 1e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -299,6 +314,7 @@ def main():
     print(f"Training on: {DEVICE}")
     print(f"Input size: {INPUT_SIZE}x{INPUT_SIZE}")
     print(f"Batch size: {BATCH_SIZE}")
+    print(f"DataLoader workers (train/val): {TRAIN_NUM_WORKERS}/{VAL_NUM_WORKERS} (requested: {_requested_workers}, suggested max total: {_suggested_max_workers})")
     print()
     
     # Create output directory
@@ -347,14 +363,14 @@ def main():
         train_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=NUM_WORKERS,
+        num_workers=TRAIN_NUM_WORKERS,
         pin_memory=True if DEVICE == "cuda" else False,
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=BATCH_SIZE, 
         shuffle=False, 
-        num_workers=NUM_WORKERS,
+        num_workers=VAL_NUM_WORKERS,
         pin_memory=True if DEVICE == "cuda" else False,
     )
     
