@@ -6,6 +6,7 @@ At runtime, `birdwatch.py`:
 - Saves **annotated full frames** (YOLO boxes) to `detections/`
 - Saves **cropped detections** to `crops/<label>/`
 - Optionally **speaks the detected species name** (Piper) and can **play a matching bird song** from `bird_songs/`
+- Maintains `detections/latest.jpg` for dashboards (latest annotated frame)
 
 ## Setup
 
@@ -13,7 +14,7 @@ At runtime, `birdwatch.py`:
 # Create and activate environment
 uv venv birds
 # Install dependencies
-uv pip install opencv-python ultralytics timm onnxscript onnxruntime
+uv pip install opencv-python ultralytics timm onnxscript onnxruntime paho-mqtt
 ```
 
 ### Camera Credentials
@@ -64,6 +65,7 @@ Main detection pipeline (producer/consumer threading):
 - Capture is **wall-clock aligned** to a fixed cadence (default `CAPTURE_INTERVAL_S=2.0`).
 - Consumer runs YOLOv8s on the latest frame, classifies crops with the ONNX classifier (if present), and saves:
   - Annotated frames with bounding boxes → `detections/` (keeps last 10)
+  - Latest annotated frame → `detections/latest.jpg` (overwritten each detection frame)
   - Cropped animals (with 100px padding) → `crops/<classification>/`
 
 ```bash
@@ -95,6 +97,16 @@ Press `Ctrl+C` to stop. Timing breakdown is printed for each frame showing grab,
   - **`BIRD_SONGS_DIR`**: directory of audio files named like `<class>.(mp3|wav)` (default: `./bird_songs`)
   - **`BIRD_SONGS_MAX_S`**: max seconds of bird song to play (default: `10`)
 
+- **MQTT (optional; Home Assistant integration)**
+  - **`MQTT_ENABLED`**: `0/1` (default: `1`; set to `0` to disable)
+  - **`MQTT_HOST`**: broker host (example: `192.168.0.84`)
+  - **`MQTT_PORT`**: broker port (default: `1883`)
+  - **`MQTT_USER`** / **`MQTT_PASS`**: broker credentials (optional)
+  - **`MQTT_TOPIC_EVENT`**: per-detection-frame events (default: `bird_detector/event`)
+  - **`MQTT_TOPIC_STATE`**: retained latest payload (default: `bird_detector/state`)
+  - **`MQTT_QOS`**: publish QoS (default: `0`)
+  - **`DETECTIONS_BASE_URL`**: if set, MQTT payload includes `annotated_image_url` pointing at `${DETECTIONS_BASE_URL}/latest.jpg`
+
 Example:
 
 ```bash
@@ -110,6 +122,30 @@ export DETECT_PADDING="100"
 # Optional audio
 export TTS_ENABLED="1"  # set to 0 to disable
 python birdwatch.py
+```
+
+**Home Assistant quick test**:
+- Developer Tools → MQTT → Listen to topic: `bird_detector/#`
+- Start `birdwatch.py` and you should see JSON messages on `bird_detector/event` (and a retained `bird_detector/state`).
+
+### Serving `latest.jpg` over HTTP (for Home Assistant dashboards)
+
+`birdwatch.py` starts the server automatically (disable with `DETECTIONS_HTTP_ENABLED=0`).
+
+Standalone run:
+
+```bash
+python serve_detections.py
+```
+
+Then `latest.jpg` is available at:
+- `http://<pi-ip>:8765/latest.jpg`
+
+Recommended `.env`:
+```
+DETECTIONS_HTTP_HOST=0.0.0.0
+DETECTIONS_HTTP_PORT=8765
+DETECTIONS_BASE_URL=http://<pi-ip>:8765
 ```
 
 ### `train_classifier.py`

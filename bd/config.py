@@ -43,12 +43,27 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class MQTTConfig:
+    enabled: bool
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    topic_event: str
+    topic_state: str
+    client_id: str
+    qos: int
+    retain_state: bool
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     base_dir: Path
     capture: CaptureConfig
     detect: DetectConfig
     output: OutputConfig
     tts: TTSConfig
+    mqtt: MQTTConfig
     models_dir: Path
     yolo_weights: Path
 
@@ -94,12 +109,26 @@ class RuntimeConfig:
             song_every_s=env_float("BIRD_SONGS_EVERY_S", 10.0),
         )
 
+        mqtt = MQTTConfig(
+            enabled=env_bool("MQTT_ENABLED", True),
+            host=os.environ.get("MQTT_HOST", "127.0.0.1"),
+            port=env_int("MQTT_PORT", 1883),
+            username=(os.environ.get("MQTT_USER") or None),
+            password=(os.environ.get("MQTT_PASS") or None),
+            topic_event=os.environ.get("MQTT_TOPIC_EVENT", "bird_detector/event"),
+            topic_state=os.environ.get("MQTT_TOPIC_STATE", "bird_detector/state"),
+            client_id=os.environ.get("MQTT_CLIENT_ID", "bird_detector"),
+            qos=env_int("MQTT_QOS", 0),
+            retain_state=env_bool("MQTT_RETAIN_STATE", True),
+        )
+
         return cls(
             base_dir=base_dir,
             capture=capture,
             detect=detect,
             output=output,
             tts=tts,
+            mqtt=mqtt,
             models_dir=base_dir / "models",
             yolo_weights=base_dir / "yolov8s.pt",
         )

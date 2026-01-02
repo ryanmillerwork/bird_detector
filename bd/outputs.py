@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Iterable
 
 import cv2
+import os
 
 from .yolo_detect import draw_detections
 
@@ -22,6 +23,24 @@ def _retain_last_n(glob_dir: Path, pattern: str, *, keep_last_n: int) -> None:
     for old in files[:-keep_last_n]:
         try:
             old.unlink()
+        except OSError:
+            pass
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """
+    Atomically copy src -> dst by writing to a temp file then replacing.
+    Keeps `latest.jpg` consistent for HTTP clients.
+    """
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    try:
+        data = src.read_bytes()
+        tmp.write_bytes(data)
+        os.replace(tmp, dst)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
         except OSError:
             pass
 
@@ -51,6 +70,13 @@ def save_detection_outputs(
     annotated_path = detections_dir / f"detection_{ts}.jpg"
     cv2.imwrite(str(annotated_path), annotated)
     _retain_last_n(detections_dir, "detection_*.jpg", keep_last_n=keep_last_annotated)
+
+    # Maintain a stable "latest.jpg" for dashboards (Home Assistant, etc.).
+    # This is best-effort; failures should not break detection.
+    try:
+        _atomic_copy(annotated_path, detections_dir / "latest.jpg")
+    except Exception:
+        pass
 
     for det in detections:
         label = det.get("species") or det["class"]

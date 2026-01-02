@@ -28,11 +28,13 @@ from bd.config import RuntimeConfig
 from bd.capture import capture_loop_jpeg
 from bd.env import env_bool, load_dotenv
 from bd.frame_filter import is_corrupted_frame
+from bd.http_server import start_detections_http_server
 from bd.outputs import format_detection_summary, save_detection_outputs
 from bd.db import connect as db_connect
 from bd.tts import TTSSpeaker
 from bd.wildlife_db import create_wildlife_table, row_from_detection, insert_wildlife
 from bd.yolo_detect import detect_animals
+from bd.mqtt_pub import MQTTPublisher
 
 
 def main() -> None:
@@ -71,6 +73,20 @@ def main() -> None:
     cfg.output.detections_dir.mkdir(exist_ok=True)
     cfg.output.crops_dir.mkdir(exist_ok=True)
 
+    http_server = None
+    if env_bool("DETECTIONS_HTTP_ENABLED", True):
+        host = (os.environ.get("DETECTIONS_HTTP_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+        port = int((os.environ.get("DETECTIONS_HTTP_PORT") or "8765").strip() or "8765")
+        try:
+            http_server = start_detections_http_server(
+                host=host,
+                port=port,
+                directory=cfg.output.detections_dir,
+            )
+            print(f"[http] serving detections on http://{host}:{port}/ (latest: /latest.jpg)")
+        except Exception as e:
+            print(f"[http] start failed; continuing without HTTP server: {e}")
+
     # Startup summary (ordered): capture -> detector -> classifier -> tts -> db
     print(
         f"[capture] JPEG {cfg.capture.jpeg_url} every {cfg.capture.capture_interval_s:.3f}s (wall-clock aligned)"
@@ -98,6 +114,8 @@ def main() -> None:
         bird_songs_dir=cfg.tts.bird_songs_dir,
         bird_songs_max_s=cfg.tts.bird_songs_max_s,
     )
+
+    mqtt = MQTTPublisher(cfg.mqtt)
 
     # Announcement policy:
     # - "No detection" does not reset the current species (blue_jay -> none -> blue_jay is not a change)
@@ -161,6 +179,8 @@ def main() -> None:
             detect_time = time.time() - detect_start
 
             classify_time = 0.0
+            best_species: str | None = None
+            best_species_conf: float | None = None
             if classifier:
                 classify_start = time.time()
                 session, idx_to_class, input_size = classifier
@@ -182,6 +202,10 @@ def main() -> None:
                     if sp and pr is not None and float(pr) > best_prob:
                         best = sp
                         best_prob = float(pr)
+
+                if best is not None:
+                    best_species = str(best)
+                    best_species_conf = float(best_prob)
 
                 if best is not None and best_prob >= tts.min_conf:
                     now = time.time()
@@ -221,6 +245,37 @@ def main() -> None:
                     keep_last_annotated=cfg.output.keep_last_annotated,
                 )
 
+                # MQTT publishing:
+                # - event: one message per frame where detections exist
+                # - state: retained "latest" payload for dashboards
+                if cfg.mqtt.enabled and annotated_path is not None:
+                    detected_at = datetime.fromtimestamp(float(scheduled_at), tz=timezone.utc)
+                    base_url = (os.environ.get("DETECTIONS_BASE_URL") or "").strip().rstrip("/")
+                    annotated_image_url = f"{base_url}/latest.jpg" if base_url else None
+                    event = {
+                        "event_id": f"{ts}-{int(float(scheduled_at) * 1000)}",
+                        "ts": detected_at.isoformat(),
+                        "epoch_s": float(scheduled_at),
+                        "source": cfg.capture.jpeg_url,
+                        "annotated_image_path": str(annotated_path),
+                        "annotated_image_url": annotated_image_url,
+                        "best_species": best_species,
+                        "best_species_conf": best_species_conf,
+                        "detections": [
+                            {
+                                "class": det.get("class"),
+                                "confidence": det.get("confidence"),
+                                "bbox": list(det.get("bbox") or []),
+                                "species": det.get("species"),
+                                "species_confidence": det.get("species_confidence"),
+                                "crop_path": det.get("crop_path"),
+                            }
+                            for det in detections
+                        ],
+                    }
+                    mqtt.publish_event(event)
+                    mqtt.publish_state(event)
+
                 # Optional DB logging: one row per detection.
                 if db_conn is not None and annotated_path is not None:
                     detected_at = datetime.fromtimestamp(float(scheduled_at), tz=timezone.utc)
@@ -253,6 +308,12 @@ def main() -> None:
         print("\nStopping...")
     finally:
         tts.stop()
+        mqtt.stop()
+        try:
+            if http_server is not None:
+                http_server.stop()
+        except Exception:
+            pass
         try:
             if db_conn is not None:
                 db_conn.close()
