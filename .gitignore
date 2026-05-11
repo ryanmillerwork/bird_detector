@@ -4,6 +4,7 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
 birds/
 
 # Models
@@ -11,9 +12,11 @@ models/
 *.pt
 *.onnx
 
-# Output
-detections/
+# Output (track HTML uis; ignore generated images)
+detections/*
+!detections/*.html
 crops/
+analysis_outputs/
 
 # Data (too large for repo)
 hand_sorted/

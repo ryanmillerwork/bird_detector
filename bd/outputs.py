@@ -53,12 +53,14 @@ def save_detection_outputs(
     detections_dir: Path,
     crops_dir: Path,
     keep_last_annotated: int = 10,
+    update_latest: bool = True,
 ) -> Path | None:
     """
     Save annotated frame + crops.
 
     - Annotated full frame -> detections/detection_<ts>.jpg
     - Crops -> crops/<label>/<ts>[_N].jpg
+    - If ``update_latest``, copy the annotated frame to detections/latest.jpg (dashboards / HA).
     """
     if not detections:
         return None
@@ -73,10 +75,11 @@ def save_detection_outputs(
 
     # Maintain a stable "latest.jpg" for dashboards (Home Assistant, etc.).
     # This is best-effort; failures should not break detection.
-    try:
-        _atomic_copy(annotated_path, detections_dir / "latest.jpg")
-    except Exception:
-        pass
+    if update_latest:
+        try:
+            _atomic_copy(annotated_path, detections_dir / "latest.jpg")
+        except Exception:
+            pass
 
     for det in detections:
         label = det.get("species") or det["class"]

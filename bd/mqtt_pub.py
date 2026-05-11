@@ -100,6 +100,15 @@ class MQTTPublisher:
     def publish_state(self, payload: dict[str, Any]) -> None:
         self._publish_json(self.cfg.topic_state, payload, retain=bool(self.cfg.retain_state))
 
+    def publish_json(self, topic: str, payload: dict[str, Any], *, retain: bool = False) -> None:
+        """
+        Publish an arbitrary JSON payload to an arbitrary topic.
+
+        Useful for derived/topics (per-species, activity, etc) while still honoring
+        the same connection/no-op semantics as the main event/state topics.
+        """
+        self._publish_json(topic, payload, retain=retain)
+
     def stop(self) -> None:
         if self._client is None:
             return

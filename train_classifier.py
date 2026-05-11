@@ -407,9 +407,15 @@ def main():
         else:
             print("  Warm-started from checkpoint weights (new classifier head).")
     
-    # Training loop
+    # Training loop (start_epoch may already be >= EPOCHS after resume)
+    val_acc = float(best_val_acc)
+    if start_epoch >= EPOCHS:
+        print(
+            f"\nResume start_epoch ({start_epoch}) is already >= EPOCHS ({EPOCHS}); "
+            "no training steps will run. Increase EPOCHS in train_classifier.py to continue.\n"
+        )
     print("\nStarting training...\n")
-    
+
     for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
         

@@ -1,0 +1,10 @@
+# Optional: WebSocket photoframe push in birdwatch.py
+websockets>=12,<16
+
+# Analysis script (analyze_birds.py)
+pandas
+matplotlib
+requests
+astral
+SQLAlchemy
+psycopg[binary]

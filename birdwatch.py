@@ -30,6 +30,7 @@ from bd.env import env_bool, load_dotenv
 from bd.frame_filter import is_corrupted_frame
 from bd.http_server import start_detections_http_server
 from bd.outputs import format_detection_summary, save_detection_outputs
+from bd.ws_push import scale_jpeg_for_ws, start_detections_ws_server
 from bd.db import connect as db_connect
 from bd.tts import TTSSpeaker
 from bd.wildlife_db import create_wildlife_table, row_from_detection, insert_wildlife
@@ -74,6 +75,7 @@ def main() -> None:
     cfg.output.crops_dir.mkdir(exist_ok=True)
 
     http_server = None
+    ws_server = None
     if env_bool("DETECTIONS_HTTP_ENABLED", True):
         host = (os.environ.get("DETECTIONS_HTTP_HOST") or "0.0.0.0").strip() or "0.0.0.0"
         port = int((os.environ.get("DETECTIONS_HTTP_PORT") or "8765").strip() or "8765")
@@ -86,6 +88,21 @@ def main() -> None:
             print(f"[http] serving detections on http://{host}:{port}/ (latest: /latest.jpg)")
         except Exception as e:
             print(f"[http] start failed; continuing without HTTP server: {e}")
+
+    if env_bool("DETECTIONS_WS_ENABLED", True):
+        ws_host = (os.environ.get("DETECTIONS_WS_HOST") or os.environ.get("DETECTIONS_HTTP_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+        ws_port = int((os.environ.get("DETECTIONS_WS_PORT") or "8766").strip() or "8766")
+        try:
+            ws_server = start_detections_ws_server(host=ws_host, port=ws_port)
+            if ws_server is not None:
+                print(
+                    f"[ws] photoframe push: connect browsers to ws://<this-pi>:{ws_port} (HTTP page stays on {os.environ.get('DETECTIONS_HTTP_PORT', '8765')})"
+                )
+            else:
+                print("[ws] disabled: install `websockets` (e.g. pip install websockets) to enable photoframe push")
+        except Exception as e:
+            print(f"[ws] start failed; continuing without WebSocket: {e}")
+            ws_server = None
 
     # Startup summary (ordered): capture -> detector -> classifier -> tts -> db
     print(
@@ -108,7 +125,6 @@ def main() -> None:
         piper_model=cfg.tts.piper_model,
         min_conf=cfg.tts.min_conf,
         cooldown_s=cfg.tts.cooldown_s,
-        max_queue=cfg.tts.max_queue,
         preroll_ms=cfg.tts.preroll_ms,
         bird_songs_enabled=cfg.tts.bird_songs_enabled,
         bird_songs_dir=cfg.tts.bird_songs_dir,
@@ -199,6 +215,9 @@ def main() -> None:
                 for det in detections:
                     sp = det.get("species")
                     pr = det.get("species_confidence")
+                    # Ignore classifier "negative" label — YOLO detected something but classifier says not a bird.
+                    if sp == "no_bird":
+                        continue
                     if sp and pr is not None and float(pr) > best_prob:
                         best = sp
                         best_prob = float(pr)
@@ -227,6 +246,10 @@ def main() -> None:
                         if now - last_song >= song_every_s:
                             play_song = True
 
+                    if str(best).lower() == "mouse":
+                        speak = False
+                        play_song = False
+
                     if speak:
                         last_name_spoken_at[best] = now
                     if play_song:
@@ -236,6 +259,10 @@ def main() -> None:
                     tts.enqueue(best, spoken, speak=speak, play_song=play_song)
 
             if detections:
+                # Filter out classifier "negative" (no_bird); skip latest.jpg / WS / MQTT when classifier is on and every box is negative.
+                mqtt_detections = [d for d in detections if d.get("species") != "no_bird"]
+                notify_realtime = not (classifier and not mqtt_detections)
+
                 annotated_path = save_detection_outputs(
                     frame=frame,
                     detections=detections,
@@ -243,12 +270,23 @@ def main() -> None:
                     detections_dir=cfg.output.detections_dir,
                     crops_dir=cfg.output.crops_dir,
                     keep_last_annotated=cfg.output.keep_last_annotated,
+                    update_latest=notify_realtime,
                 )
+
+                if ws_server is not None and annotated_path is not None and notify_realtime:
+                    try:
+                        ws_server.notify_jpeg(
+                            scale_jpeg_for_ws(
+                                (cfg.output.detections_dir / "latest.jpg").read_bytes()
+                            )
+                        )
+                    except OSError:
+                        pass
 
                 # MQTT publishing:
                 # - event: one message per frame where detections exist
                 # - state: retained "latest" payload for dashboards
-                if cfg.mqtt.enabled and annotated_path is not None:
+                if cfg.mqtt.enabled and annotated_path is not None and notify_realtime:
                     detected_at = datetime.fromtimestamp(float(scheduled_at), tz=timezone.utc)
                     base_url = (os.environ.get("DETECTIONS_BASE_URL") or "").strip().rstrip("/")
                     annotated_image_url = f"{base_url}/latest.jpg" if base_url else None
@@ -270,11 +308,32 @@ def main() -> None:
                                 "species_confidence": det.get("species_confidence"),
                                 "crop_path": det.get("crop_path"),
                             }
-                            for det in detections
+                            for det in mqtt_detections
                         ],
                     }
                     mqtt.publish_event(event)
                     mqtt.publish_state(event)
+
+                    # Home Assistant helpers:
+                    # - per-species last_seen: <prefix>/species/<species>/last_seen (retained)
+                    # - activity last_seen:   <prefix>/activity/last_seen (retained)
+                    # Prefix is derived from MQTT_TOPIC_STATE (default: bird_detector/state -> bird_detector).
+                    topic_root = (
+                        cfg.mqtt.topic_state.rsplit("/", 1)[0]
+                        if "/" in cfg.mqtt.topic_state
+                        else cfg.mqtt.topic_state
+                    )
+                    sp = event.get("best_species")
+                    if sp and sp != "no_bird":
+                        last_seen = {
+                            "event_id": event["event_id"],
+                            "ts": event["ts"],
+                            "epoch_s": event["epoch_s"],
+                            "species": sp,
+                            "species_conf": event.get("best_species_conf"),
+                        }
+                        mqtt.publish_json(f"{topic_root}/species/{sp}/last_seen", last_seen, retain=True)
+                        mqtt.publish_json(f"{topic_root}/activity/last_seen", last_seen, retain=True)
 
                 # Optional DB logging: one row per detection.
                 if db_conn is not None and annotated_path is not None:
@@ -312,6 +371,11 @@ def main() -> None:
         try:
             if http_server is not None:
                 http_server.stop()
+        except Exception:
+            pass
+        try:
+            if ws_server is not None:
+                ws_server.stop()
         except Exception:
             pass
         try:

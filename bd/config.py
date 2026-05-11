@@ -33,7 +33,6 @@ class TTSConfig:
     piper_model: Path
     min_conf: float
     cooldown_s: float
-    max_queue: int
     preroll_ms: int
     bird_songs_enabled: bool
     bird_songs_dir: Path
@@ -100,7 +99,6 @@ class RuntimeConfig:
             ),
             min_conf=env_float("TTS_MIN_CONF", 0.0),
             cooldown_s=env_float("TTS_COOLDOWN_S", 15.0),
-            max_queue=env_int("TTS_MAX_QUEUE", 10),
             preroll_ms=env_int("TTS_PREROLL_MS", 650),
             bird_songs_enabled=env_bool("BIRD_SONGS_ENABLED", True),
             bird_songs_dir=Path(os.environ.get("BIRD_SONGS_DIR", str(base_dir / "bird_songs"))),

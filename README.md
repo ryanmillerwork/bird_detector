@@ -128,6 +128,40 @@ python birdwatch.py
 - Developer Tools → MQTT → Listen to topic: `bird_detector/#`
 - Start `birdwatch.py` and you should see JSON messages on `bird_detector/event` (and a retained `bird_detector/state`).
 
+### Analyzing feeder visits
+
+`analyze_birds.py` reads detections from the Postgres `wildlife` table, enriches them with Mansfield, MA hourly weather from Open-Meteo, computes sunrise/sunset-relative timing, and writes charts plus CSV summaries.
+
+By default it excludes `no_bird`, `mouse`, `red_squirrel`, and `eastern_gray_squirrel` from all outputs.
+
+Install the analysis dependencies into the same environment:
+
+```bash
+uv pip install -r requirements.txt
+```
+
+Make sure `.env` has the same Postgres settings used by `birdwatch.py`, then run:
+
+```bash
+python analyze_birds.py --days 365 --min-confidence 0.5
+```
+
+Outputs are written to `analysis_outputs/` by default:
+- `species_by_hour.png` / `.csv` - 1-hour local clock bins by species
+- `species_by_sunrise_relative.png` / `.csv` - 1-hour bins relative to sunrise
+- `species_by_sunset_relative.png` / `.csv` - 1-hour bins relative to sunset, where negative hours are before sunset
+- `species_by_month.png` / `.csv` - monthly detections per species
+- `weather_summary.csv` and `detections_vs_*.png` - detections grouped by weather conditions
+- `species_visits.csv`, `species_interactions.csv`, and `species_interaction_*.png` - same-species detections collapsed into visits, then checked for follow-on species within 5 and 15 minute windows
+
+Useful options:
+
+```bash
+python analyze_birds.py --top-species 12 --refresh-weather
+python analyze_birds.py --visit-gap-minutes 3 --interaction-windows 5 10 20
+python analyze_birds.py --exclude-species no_bird mouse red_squirrel eastern_gray_squirrel
+```
+
 ### Serving `latest.jpg` over HTTP (for Home Assistant dashboards)
 
 `birdwatch.py` starts the server automatically (disable with `DETECTIONS_HTTP_ENABLED=0`).
@@ -147,6 +181,14 @@ DETECTIONS_HTTP_HOST=0.0.0.0
 DETECTIONS_HTTP_PORT=8765
 DETECTIONS_BASE_URL=http://<pi-ip>:8765
 ```
+
+### Photoframe (WebSocket push, optional)
+
+When `birdwatch` runs, install the optional **`websockets`** package into the **same** Python you use for the rest of the stack (this repo’s `birds` venv is uv-managed, e.g. `uv pip install --python birds/bin/python -r requirements.txt`, not a separate empty `.venv`). The **WebSocket** server on **`DETECTIONS_WS_PORT`** (default **8766**) then pushes each new annotated JPEG to browsers. The static **HTTP** server (same as above) still serves `http://<pi-ip>:8765/photoframe.html`; that page opens **`ws://<pi-ip>:8766`** to receive frames. Use `?wsport=` if you need a custom port. **Only frames with at least one detection** update `latest.jpg` and trigger a push (identical to HTTP `latest.jpg`). Each `ws.send` **runs to completion**; if another detection frame arrives while a send is in progress, the new image is **dropped** (no pre-emption, no deep queue). When idle, the next `notify` still holds at most one not-yet-sent payload. Tune **`DETECTIONS_WS_SEND_TIMEOUT_S`** (default **20**) if you still see per-client send failures in the logs. For a smaller WebSocket payload (not `latest.jpg` over HTTP), set **`DETECTIONS_WS_JPEG_SCALE=0.5`** (half width and height) and optionally **`DETECTIONS_WS_JPEG_QUALITY`**.
+
+Disable WebSocket: `DETECTIONS_WS_ENABLED=0` in `.env`, or run without the `websockets` package (birdwatch will log a skip).
+
+Fallback (timer-based HTTP polling, no `websockets`): open `http://<pi-ip>:8765/photoframe-poll.html`.
 
 ### `train_classifier.py`
 
