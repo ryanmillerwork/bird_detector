@@ -55,6 +55,40 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import transforms
 from PIL import Image
 import timm
+import shutil
+import subprocess
+
+
+def _nvidia_driver_available() -> bool:
+    if not shutil.which("nvidia-smi"):
+        return False
+    try:
+        return subprocess.run(
+            ["nvidia-smi"], capture_output=True, timeout=10
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _resolve_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+        print(
+            "WARNING: CUDA_VISIBLE_DEVICES is empty, so PyTorch will not use the GPU.\n"
+            "  Unset it or set CUDA_VISIBLE_DEVICES=0 before running training.\n"
+        )
+    elif _nvidia_driver_available():
+        cuda_build = torch.version.cuda or "none (CPU-only wheel)"
+        print(
+            "WARNING: nvidia-smi sees a GPU but PyTorch has no CUDA support "
+            f"(torch {torch.__version__}, bundled CUDA: {cuda_build}).\n"
+            "Training will run on CPU. Reinstall PyTorch with CUDA, for example:\n"
+            "  uv pip install --python birds/bin/python torch torchvision "
+            "--index-url https://download.pytorch.org/whl/cu124\n"
+        )
+    return "cpu"
 
 # Configuration (from .env file)
 DATA_DIR = Path(_env.get("DATA_DIR", "hand_sorted"))
@@ -76,7 +110,7 @@ NUM_WORKERS = TRAIN_NUM_WORKERS  # Back-compat: used for printing only
 EPOCHS = 30
 LEARNING_RATE = 1e-4
 RESUME = _env.get("RESUME", "ask").strip().lower()  # ask, resume, reset, fresh
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = _resolve_device()
 
 
 class BirdDataset(Dataset):
@@ -156,6 +190,11 @@ def class_mapping_fingerprint(class_to_idx: dict) -> str:
     payload = json.dumps(class_to_idx, sort_keys=True, separators=(",", ":")).encode("utf-8")
     # Short fingerprint is enough to detect mismatches without being noisy.
     return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def load_checkpoint(path: Path) -> dict:
+    """Load checkpoint tensors to CPU; load_state_dict copies them to the model device."""
+    return torch.load(path, weights_only=False, map_location="cpu")
 
 
 def class_mappings_match(ckpt_mapping, current_mapping: dict) -> bool:
@@ -318,6 +357,8 @@ def export_to_onnx(model, num_classes, input_size, output_path):
 
 def main():
     print(f"Training on: {DEVICE}")
+    if DEVICE == "cuda":
+        print(f"  GPU: {torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})")
     print(f"Input size: {INPUT_SIZE}x{INPUT_SIZE}")
     print(f"Batch size: {BATCH_SIZE}")
     print(f"DataLoader workers (train/val): {TRAIN_NUM_WORKERS}/{VAL_NUM_WORKERS} (requested: {_requested_workers}, suggested max total: {_suggested_max_workers})")
@@ -397,7 +438,7 @@ def main():
     checkpoint_path = OUTPUT_DIR / "best_model.pt"
 
     if checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        checkpoint = load_checkpoint(checkpoint_path)
         ckpt_epoch = checkpoint.get("epoch", 0)
         ckpt_val_acc = checkpoint.get("val_acc", 0.0)
         ckpt_class_to_idx = checkpoint.get("class_to_idx")
@@ -494,7 +535,7 @@ def main():
     print("\nExporting to ONNX...")
     
     # Load best model for export
-    checkpoint = torch.load(OUTPUT_DIR / "best_model.pt", weights_only=False)
+    checkpoint = load_checkpoint(OUTPUT_DIR / "best_model.pt")
     model.load_state_dict(checkpoint["model_state_dict"])
     
     onnx_path = OUTPUT_DIR / "bird_classifier.onnx"

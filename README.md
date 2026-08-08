@@ -17,6 +17,14 @@ uv venv birds
 uv pip install opencv-python ultralytics timm onnxscript onnxruntime paho-mqtt
 ```
 
+**Training on a GPU machine:** the default `pip`/`uv` PyTorch wheel is often CPU-only. If `nvidia-smi` shows a GPU but training prints `Training on: cpu`, reinstall with CUDA support (pick a wheel matching your driver; `cu124` works on most CUDA 12.x nodes):
+
+```bash
+uv pip install --python birds/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+Also check that `CUDA_VISIBLE_DEVICES` is not set to empty (`""`), which hides all GPUs from PyTorch.
+
 ### Camera Credentials
 
 Copy the example config and add your camera credentials:
