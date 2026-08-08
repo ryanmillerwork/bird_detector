@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top-species",
         type=int,
-        default=8,
+        default=15,
         help="Limit multi-species charts to the top N species by count.",
     )
     parser.add_argument(

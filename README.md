@@ -236,12 +236,13 @@ python train_classifier.py
 - `bird_classifier.onnx` — Optimized for inference (updated on each best model)
 - `class_mapping.json` — Class name ↔ index mapping
 
-**Resume training:** If `best_model.pt` exists, training automatically resumes from that checkpoint.
+**Resume training:** If `best_model.pt` exists and its class mapping matches the current data, you get an interactive prompt: resume (continue epoch/optimizer/val bar), reset (keep weights but restart epochs and val bar), or fresh (ImageNet-pretrained weights). Empty input defaults to resume. If class mappings differ, training starts fresh from pretrained weights without prompting. Non-interactive runs (nohup, systemd) skip the prompt and resume; set `RESUME=reset` or `RESUME=fresh` in `.env` to override.
 
 **Configuration** (in `.env` file):
 - `INPUT_SIZE` — Image size (default 320)
 - `EPOCHS` — Training epochs (default 30)
 - `MIN_SAMPLES` — Minimum images per class (default 5)
+- `RESUME` — When a matching checkpoint exists: `ask` (prompt if interactive), `resume`, `reset`, or `fresh` (default `ask`)
 
 ## Deployment to Pi 5
 

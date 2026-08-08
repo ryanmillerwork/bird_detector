@@ -36,6 +36,7 @@ from bd.tts import TTSSpeaker
 from bd.wildlife_db import create_wildlife_table, row_from_detection, insert_wildlife
 from bd.yolo_detect import detect_animals
 from bd.mqtt_pub import MQTTPublisher
+from bd.sprinkler import SprinklerController
 
 
 def main() -> None:
@@ -132,6 +133,7 @@ def main() -> None:
     )
 
     mqtt = MQTTPublisher(cfg.mqtt)
+    sprinkler = SprinklerController(cfg.sprinkler)
 
     # Announcement policy:
     # - "No detection" does not reset the current species (blue_jay -> none -> blue_jay is not a change)
@@ -263,6 +265,13 @@ def main() -> None:
                 mqtt_detections = [d for d in detections if d.get("species") != "no_bird"]
                 notify_realtime = not (classifier and not mqtt_detections)
 
+                for det in detections:
+                    sp = det.get("species")
+                    conf = det.get("species_confidence")
+                    if sp and conf is not None and sprinkler.maybe_trigger(sp, float(conf)):
+                        det["sprinkler_seconds"] = int(cfg.sprinkler.duration_s)
+                        break
+
                 annotated_path = save_detection_outputs(
                     frame=frame,
                     detections=detections,
@@ -368,6 +377,7 @@ def main() -> None:
     finally:
         tts.stop()
         mqtt.stop()
+        sprinkler.stop()
         try:
             if http_server is not None:
                 http_server.stop()

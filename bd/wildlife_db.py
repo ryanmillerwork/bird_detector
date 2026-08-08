@@ -21,7 +21,8 @@ Schema reference (provided by user):
         bbox_y2 INTEGER,
         video_source TEXT,
         reviewed BOOLEAN DEFAULT FALSE,
-        corrected_label TEXT
+        corrected_label TEXT,
+        sprinkler_seconds INTEGER
     );
 """
 
@@ -67,6 +68,7 @@ class WildlifeRow:
     bbox_x2: int | None
     bbox_y2: int | None
     video_source: str | None
+    sprinkler_seconds: int | None = None
 
 
 def create_wildlife_table(conn, *, table: str | None = None) -> None:
@@ -94,12 +96,16 @@ def create_wildlife_table(conn, *, table: str | None = None) -> None:
         video_source TEXT,
 
         reviewed BOOLEAN DEFAULT FALSE,
-        corrected_label TEXT
+        corrected_label TEXT,
+
+        sprinkler_seconds INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_wildlife_detected_at ON {t}(detected_at);
     CREATE INDEX IF NOT EXISTS idx_wildlife_classifier_label ON {t}(classifier_label);
     CREATE INDEX IF NOT EXISTS idx_wildlife_reviewed ON {t}(reviewed);
+
+    ALTER TABLE {t} ADD COLUMN IF NOT EXISTS sprinkler_seconds INTEGER;
     """
     cur = conn.cursor()
     cur.execute(sql)
@@ -121,9 +127,10 @@ def insert_wildlife(conn, row: WildlifeRow, *, table: str | None = None) -> None
             bbox_y1,
             bbox_x2,
             bbox_y2,
-            video_source
+            video_source,
+            sprinkler_seconds
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         );
     """
     cur = conn.cursor()
@@ -143,6 +150,7 @@ def insert_wildlife(conn, row: WildlifeRow, *, table: str | None = None) -> None
             row.bbox_x2,
             row.bbox_y2,
             row.video_source,
+            row.sprinkler_seconds,
         ),
     )
 
@@ -167,6 +175,7 @@ def row_from_detection(
 
     classifier_label = det.get("species")
     classifier_confidence = det.get("species_confidence")
+    sprinkler_seconds = det.get("sprinkler_seconds")
 
     return WildlifeRow(
         detected_at=detected_at,
@@ -182,6 +191,7 @@ def row_from_detection(
         bbox_x2=int(x2) if x2 is not None else None,
         bbox_y2=int(y2) if y2 is not None else None,
         video_source=video_source,
+        sprinkler_seconds=int(sprinkler_seconds) if sprinkler_seconds is not None else None,
     )
 
 

@@ -42,6 +42,16 @@ class TTSConfig:
 
 
 @dataclass(frozen=True)
+class SprinklerConfig:
+    enabled: bool
+    host: str
+    duration_s: float
+    cooldown_s: float
+    min_conf: float
+    species: frozenset[str]
+
+
+@dataclass(frozen=True)
 class MQTTConfig:
     enabled: bool
     host: str
@@ -63,6 +73,7 @@ class RuntimeConfig:
     output: OutputConfig
     tts: TTSConfig
     mqtt: MQTTConfig
+    sprinkler: SprinklerConfig
     models_dir: Path
     yolo_weights: Path
 
@@ -120,6 +131,21 @@ class RuntimeConfig:
             retain_state=env_bool("MQTT_RETAIN_STATE", True),
         )
 
+        default_species = "eastern_chipmunk,red_squirrel,eastern_gray_squirrel"
+        species_raw = os.environ.get("SPRINKLER_SPECIES", default_species)
+        species = frozenset(
+            s.strip() for s in species_raw.split(",") if s.strip()
+        )
+
+        sprinkler = SprinklerConfig(
+            enabled=env_bool("SPRINKLER_ENABLED", False),
+            host=os.environ.get("SPRINKLER_HOST", "http://192.168.0.198"),
+            duration_s=env_float("SPRINKLER_DURATION_S", 1.0),
+            cooldown_s=env_float("SPRINKLER_COOLDOWN_S", 30.0),
+            min_conf=env_float("SPRINKLER_MIN_CONF", 0.0),
+            species=species,
+        )
+
         return cls(
             base_dir=base_dir,
             capture=capture,
@@ -127,6 +153,7 @@ class RuntimeConfig:
             output=output,
             tts=tts,
             mqtt=mqtt,
+            sprinkler=sprinkler,
             models_dir=base_dir / "models",
             yolo_weights=base_dir / "yolov8s.pt",
         )

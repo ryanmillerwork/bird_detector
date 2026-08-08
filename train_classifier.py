@@ -75,6 +75,7 @@ VAL_NUM_WORKERS = min(_requested_workers, max(0, _suggested_max_workers - TRAIN_
 NUM_WORKERS = TRAIN_NUM_WORKERS  # Back-compat: used for printing only
 EPOCHS = 30
 LEARNING_RATE = 1e-4
+RESUME = _env.get("RESUME", "ask").strip().lower()  # ask, resume, reset, fresh
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -157,79 +158,83 @@ def class_mapping_fingerprint(class_to_idx: dict) -> str:
     return hashlib.sha256(payload).hexdigest()[:12]
 
 
-def load_checkpoint_safely(
-    checkpoint_path: Path,
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    scheduler,
-    *,
-    num_classes: int,
-    class_to_idx: dict,
-):
-    """
-    Load a training checkpoint.
+def class_mappings_match(ckpt_mapping, current_mapping: dict) -> bool:
+    """True only if both mappings are identical (same keys and indices)."""
+    if not isinstance(ckpt_mapping, dict):
+        return False
+    if len(ckpt_mapping) != len(current_mapping):
+        return False
+    return ckpt_mapping == current_mapping
 
-    If the checkpoint was trained with a different class mapping (count or mapping),
-    we "warm start" by only loading tensors that match by name *and* shape, and we
-    reset optimizer/scheduler/epoch tracking. This avoids head size mismatches.
-    """
-    checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-    ckpt_num_classes = checkpoint.get("num_classes")
-    if ckpt_num_classes is None and isinstance(checkpoint.get("class_to_idx"), dict):
-        ckpt_num_classes = len(checkpoint["class_to_idx"])
+def describe_class_mapping_diff(ckpt_mapping, current_mapping: dict) -> tuple[list[str], list[str]]:
+    """Return (added, removed) class names relative to the checkpoint."""
+    ckpt_classes = set(ckpt_mapping.keys()) if isinstance(ckpt_mapping, dict) else set()
+    current_classes = set(current_mapping.keys())
+    added = sorted(current_classes - ckpt_classes)
+    removed = sorted(ckpt_classes - current_classes)
+    return added, removed
 
-    current_fp = class_mapping_fingerprint(class_to_idx)
-    ckpt_fp = checkpoint.get("class_mapping_fingerprint")
-    if ckpt_fp is None and isinstance(checkpoint.get("class_to_idx"), dict):
-        ckpt_fp = class_mapping_fingerprint(checkpoint["class_to_idx"])
 
-    mapping_mismatch = (ckpt_num_classes is not None and ckpt_num_classes != num_classes) or (
-        ckpt_fp is not None and ckpt_fp != current_fp
-    )
+def backup_artifacts(output_dir: Path) -> None:
+    """Rename existing deploy artifacts so a reset/fresh run cannot overwrite them."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for name in ("best_model.pt", "bird_classifier.onnx"):
+        path = output_dir / name
+        if path.exists():
+            bak = output_dir / f"{name}.{ts}.bak"
+            path.rename(bak)
+            print(f"  Backed up {path} -> {bak}")
 
-    if mapping_mismatch:
-        print(
-            "\nCheckpoint class mapping differs from current training run; "
-            "loading matching weights only and restarting optimizer/scheduler."
-        )
-        if ckpt_num_classes is not None:
-            print(f"  Checkpoint num_classes: {ckpt_num_classes}, current: {num_classes}")
-        if ckpt_fp is not None:
-            print(f"  Checkpoint mapping fp: {ckpt_fp}, current: {current_fp}")
 
-        ckpt_state = checkpoint.get("model_state_dict", checkpoint)
-        model_state = model.state_dict()
-        filtered_state = {}
-        skipped = 0
-        for k, v in ckpt_state.items():
-            if k in model_state and hasattr(v, "shape") and model_state[k].shape == v.shape:
-                filtered_state[k] = v
-            else:
-                skipped += 1
+def prompt_resume_mode(checkpoint_epoch: int, val_acc: float) -> str:
+    """Interactive choice: resume, reset, or fresh. Defaults to resume."""
+    display_epoch = checkpoint_epoch + 1
+    print(f"\nFound existing checkpoint (epoch {display_epoch}, best val_acc {val_acc:.2f}%).")
+    print(f"  1) Resume - continue from epoch {display_epoch}, keep {val_acc:.2f}% as the bar to beat")
+    print("  2) Reset  - keep the trained weights, restart at epoch 1 with the bar at 0")
+    print("  3) Fresh  - discard and retrain from ImageNet-pretrained weights")
+    while True:
+        try:
+            choice = input("Choice [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return "resume"
+        if choice in ("", "1"):
+            return "resume"
+        if choice == "2":
+            return "reset"
+        if choice == "3":
+            return "fresh"
+        print("Invalid choice. Enter 1, 2, or 3.")
 
-        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
-        if skipped:
-            print(f"  Skipped {skipped} tensor(s) due to shape/name mismatch (e.g., classifier head).")
-        if missing:
-            print(f"  Missing keys (expected with new head): {len(missing)}")
-        if unexpected:
-            print(f"  Unexpected keys: {len(unexpected)}")
 
-        return {
-            "start_epoch": 0,
-            "best_val_acc": 0.0,
-            "resumed": False,
-        }
+def resolve_resume_mode(checkpoint_epoch: int, val_acc: float) -> str:
+    """Pick resume/reset/fresh from RESUME env and optional interactive prompt."""
+    if RESUME not in ("ask", "resume", "reset", "fresh"):
+        print(f"Warning: unknown RESUME={RESUME!r}; treating as 'ask'")
+        mode = "ask"
+    else:
+        mode = RESUME
 
-    # Exact match: full resume
+    if mode != "ask":
+        return mode
+
+    if sys.stdin.isatty():
+        return prompt_resume_mode(checkpoint_epoch, val_acc)
+
+    print("Non-interactive stdin; resuming from checkpoint (set RESUME=reset|fresh to override).")
+    return "resume"
+
+
+def apply_checkpoint_resume(checkpoint: dict, model, optimizer, scheduler) -> tuple[int, float]:
+    """Full resume: weights, optimizer, epoch counter, and scheduler position."""
     model.load_state_dict(checkpoint["model_state_dict"])
     if "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     start_epoch = checkpoint.get("epoch", 0) + 1
     best_val_acc = checkpoint.get("val_acc", 0.0)
 
-    # Advance scheduler to correct position (suppress harmless warning)
     import warnings
 
     with warnings.catch_warnings():
@@ -237,11 +242,12 @@ def load_checkpoint_safely(
         for _ in range(start_epoch):
             scheduler.step()
 
-    return {
-        "start_epoch": start_epoch,
-        "best_val_acc": best_val_acc,
-        "resumed": True,
-    }
+    return start_epoch, best_val_acc
+
+
+def apply_checkpoint_reset(checkpoint: dict, model) -> None:
+    """Load trained weights only; caller keeps start_epoch=0 and best_val_acc=0."""
+    model.load_state_dict(checkpoint["model_state_dict"])
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
@@ -389,33 +395,49 @@ def main():
     start_epoch = 0
     best_val_acc = 0.0
     checkpoint_path = OUTPUT_DIR / "best_model.pt"
-    
+
     if checkpoint_path.exists():
-        print(f"\nFound existing checkpoint, resuming training...")
-        resume = load_checkpoint_safely(
-            checkpoint_path,
-            model,
-            optimizer,
-            scheduler,
-            num_classes=num_classes,
-            class_to_idx=class_to_idx,
-        )
-        start_epoch = resume["start_epoch"]
-        best_val_acc = resume["best_val_acc"]
-        if resume["resumed"]:
-            print(f"  Resumed from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        ckpt_epoch = checkpoint.get("epoch", 0)
+        ckpt_val_acc = checkpoint.get("val_acc", 0.0)
+        ckpt_class_to_idx = checkpoint.get("class_to_idx")
+
+        if not class_mappings_match(ckpt_class_to_idx, class_to_idx):
+            added, removed = describe_class_mapping_diff(ckpt_class_to_idx, class_to_idx)
+            print("\nCheckpoint class mapping does not match current data; starting from pretrained weights.")
+            if removed:
+                print(f"  Removed classes: {', '.join(removed)}")
+            if added:
+                print(f"  Added classes: {', '.join(added)}")
+            if not removed and not added:
+                print("  Class names match but index assignments differ (sample counts may have shifted).")
+            print("  Backing up existing artifacts before fresh training...")
+            backup_artifacts(OUTPUT_DIR)
         else:
-            print("  Warm-started from checkpoint weights (new classifier head).")
-    
-    # Training loop (start_epoch may already be >= EPOCHS after resume)
-    val_acc = float(best_val_acc)
-    if start_epoch >= EPOCHS:
-        print(
-            f"\nResume start_epoch ({start_epoch}) is already >= EPOCHS ({EPOCHS}); "
-            "no training steps will run. Increase EPOCHS in train_classifier.py to continue.\n"
-        )
+            mode = resolve_resume_mode(ckpt_epoch, ckpt_val_acc)
+
+            if mode == "resume":
+                start_epoch, best_val_acc = apply_checkpoint_resume(
+                    checkpoint, model, optimizer, scheduler
+                )
+                print(f"  Resuming from epoch {start_epoch}, best val_acc: {best_val_acc:.2f}%")
+                if start_epoch >= EPOCHS:
+                    print(
+                        f"\nCheckpoint already completed all {EPOCHS} epochs. "
+                        "Use reset or fresh (RESUME=reset|fresh) to train again."
+                    )
+                    sys.exit(0)
+            elif mode == "reset":
+                print("\nReset: keeping trained weights, restarting at epoch 1 with val bar at 0.")
+                backup_artifacts(OUTPUT_DIR)
+                apply_checkpoint_reset(checkpoint, model)
+            else:  # fresh
+                print("\nFresh: retraining from ImageNet-pretrained weights.")
+                backup_artifacts(OUTPUT_DIR)
+
     print("\nStarting training...\n")
 
+    val_acc = best_val_acc
     for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
         
